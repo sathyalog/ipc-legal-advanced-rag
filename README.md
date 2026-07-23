@@ -1,9 +1,11 @@
 ---
-title: Indian Ipc Legal Ai Assistant
-emoji: 👁
+title: IPC Legal AI Assistant
+emoji: ⚖️
 colorFrom: blue
-colorTo: red
-sdk: static
+colorTo: indigo
+sdk: streamlit
+sdk_version: 1.32.0
+app_file: main.py
 pinned: false
 ---
 
