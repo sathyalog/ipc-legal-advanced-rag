@@ -1,11 +1,9 @@
-# Python-generated files
+.venv/
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
+*.pyc
 .env
+.DS_Store
+.qdrant/
+.cache/
+data/ingest_docstore.json
+repomix-output.xml
