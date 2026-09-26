@@ -1,0 +1,9 @@
+[server]
+# Streamlit's module watcher walks every imported package on each rerun. With `transformers`
+# (lazy-loaded) that means importing hundreds of unused vision submodules per query -> CPU/RAM spike
+# and torchvision tracebacks. Nothing here needs hot-reload, so switch it off.
+fileWatcherType = "none"
+runOnSave = false
+
+[browser]
+gatherUsageStats = false

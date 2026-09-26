@@ -1,0 +1,11 @@
+# RAGAS evaluation (retrieval tier only, no LLM)
+
+_Generated 2026-09-26 23:41_
+
+| config | n | id_context_precision | id_context_recall | wall_s |
+|---|---|---|---|---|
+| full | 40 | 0.441 | 0.868 | 175 |
+| full · lookup | 12 | 0.867 | 1.0 |  |
+| full · semantic | 10 | 0.2 | 1.0 |  |
+| full · lay | 8 | 0.15 | 0.5 |  |
+| full · multi | 4 | 0.35 | 0.875 |  |

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.qdrant/
+.cache/
+data/ingest_docstore.json
+repomix-output.xml

@@ -1,203 +1,100 @@
-import os
+"""Streamlit UI - a thin client over the ipc_rag package.
 
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"  # hide unnecessary logs
+    streamlit run main.py
 
-from chunking import chunk_data
-from database import create_index
-from document_loading import load_document
-from dotenv import load_dotenv
-from embeddings import insert_or_fetch_embeddings
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import tool
-from langchain_openrouter import ChatOpenRouter
-from pinecone import Pinecone
-import streamlit as st
-
-# 1. Load Environment Variables
-load_dotenv(override=True)
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-connect_database = create_index()
-print(pc.list_indexes())
-
-# 2. Configure Streamlit Page Layout
-st.set_page_config(
-    page_title="IPC Legal AI Assistant",
-    page_icon="⚖️",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
-
-st.title("⚖️ Indian Penal Code (IPC) AI Assistant")
-if "documents" not in st.session_state:
-    st.session_state.documents = None
-st.caption(
-    "Query Indian Penal Code sections and offenses with document-grounded answers."
-)
-
-# 3. Initialize Model and Runnable Chain
-model = ChatOpenRouter(
-    model="openrouter/free", openrouter_api_key=os.getenv("OPENROUTER_API_KEY")
-)
-
-system_prompt_text = """You are a precise, document-grounded AI assistant. Your sole purpose is to answer the user's question using ONLY the provided document context.
-
-Instructions:
-- Always mention the relevant IPC Section numbers (e.g., IPC Section 212) explicitly.
-- Fetch the exact text from the document that answers the user's question.
-### CORE GROUNDING RULES:
-1. Zero External Knowledge: You must operate ONLY on the information explicitly contained within the provided context. Do NOT use your prior knowledge, general training data, or outside assumptions.
-2. Zero Inferences: Do NOT assume, extrapolate, speculate, or deduce facts that are not directly stated in the context.
-3. Strict Fallback: If the exact information needed to answer the query is missing, incomplete, or ambiguous in the context, you MUST output EXACTLY: "I cannot find this information in the provided document."
-
-### CONTEXT:
-{context}
-User Question:
-{input}
+If no LLM is reachable the app still works in "sections only" mode: it shows
+the retrieved IPC sections without a generated answer.
 """
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", system_prompt_text),
-        ("human", "{input}"),
-    ]
-)
+import os
 
-chain = prompt | model
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-# 4. Initialize Chat History in Streamlit Session State
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+import streamlit as st
 
-# 5. Display Chat History
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+from ipc_rag.config import get_settings
 
-# Initialize DuckDuckGo tool
-search_tool = DuckDuckGoSearchRun()
+st.set_page_config(page_title="IPC Legal AI Assistant", page_icon="⚖️", layout="centered")
+settings = get_settings()
+
+
+@st.cache_resource(show_spinner="Loading index and models…")
+def load_assistant():
+    from ipc_rag.generation.answer import IPCAssistant
+    if not settings.sections_path.exists():
+        from ipc_rag.ingest.__main__ import run as ingest
+        if ingest() != 0:
+            raise RuntimeError("Ingestion failed - see logs")
+    return IPCAssistant(settings)
+
+
+def render_sections(result, cited: set[str]) -> None:
+    for r in result.sections:
+        s = r.section
+        mark = "📌 " if s.section_id in cited else ""
+        how = "exact match" if r.source == "exact" else f"search · {r.score:.2f}"
+        with st.expander(f"{mark}Section {s.section_id} — {s.title}  ·  p.{s.page_start}  ·  {how}"):
+            st.caption(f"Chapter {s.chapter_no}: {s.chapter_title}" + ("  ·  **repealed/omitted**" if s.repealed else ""))
+            st.write(s.text)
+
+
+st.title("⚖️ Indian Penal Code (IPC) AI Assistant")
+st.caption("Answers grounded in the text of the IPC, 1860, with verified section citations.")
 
 with st.sidebar:
-    st.header("🔍 Quick DuckDuckGo web search(not IPC)")
-    with st.form("sidebar_search_form"):
-        duckduckgo_search = st.text_input(
-            "Search widget",
-            key="placeholder",
-        )
-        search_submitted = st.form_submit_button("Search Web")
+    st.subheader("Settings")
+    provider = settings.llm_provider
+    model = settings.anthropic_answer_model if provider == "anthropic" else settings.ollama_model
+    st.markdown(f"**LLM:** `{provider}` · `{model}`")
+    answer_mode = st.toggle("Generate answer (uses LLM)", value=True,
+                            help="Off = show retrieved sections only (no LLM needed)")
+    st.markdown(f"**Retrieval:** router + hybrid (bge + BM25) + rerank · top {settings.rerank_top_n}")
+    if st.button("Clear chat"):
+        st.session_state.messages = []
 
-    if search_submitted and duckduckgo_search.strip():
-        with st.spinner("Searching..."):
-            try:
-                results = search_tool.invoke(duckduckgo_search)
-                st.text(results)
-            except Exception as e:
-                st.error(f"Search failed: {e}")
+assistant = load_assistant()
+st.session_state.setdefault("messages", [])
 
-    st.header("Upload the IPC_186045 document")
-    file = "assets/IPC_186045.pdf"
-    if st.button("Upload & Index Document"):
-        with st.spinner("Loading & indexing document into pinecone..."):
-            try:
-                st.session_state.documents = load_document(file)
-                st.success("Document uploaded successfully!")
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
 
-                if st.session_state.documents:
-                    total_pages = len(st.session_state.documents)
-                    st.text(f"Total pages: {total_pages}")
-                    chunks = chunk_data(st.session_state.documents)
-
-                    # Clean chunk metadata
-                    for chunk in chunks:
-                        chunk.metadata = {
-                            k: v
-                            for k, v in chunk.metadata.items()
-                            if isinstance(v, (str, int, float, bool))
-                            and k not in ["dl_meta", "doc_items"]
-                        }
-
-                    st.session_state.chunks = chunks
-                    st.text(f"Total chunks: {len(st.session_state.chunks)}")
-
-                    vector_store = insert_or_fetch_embeddings(chunks)
-                    st.session_state.vector_store = vector_store
-                    st.success(f"Indexed {len(chunks)} chunks into Pinecone!")
-                else:
-                    st.error("No documents loaded.")
-            except Exception as e:
-                st.error(f"Failed to process document: {e}")
-
-
-def generate_response(user_input):
-    if st.session_state.get("vector_store") is None:
-        st.session_state.vector_store = insert_or_fetch_embeddings()
-
-    context_text = ""
-    docs = []
-
-    if st.session_state.vector_store:
-        # Increase k to retrieve more context, removing rigid metadata filters
-        retriever = st.session_state.vector_store.as_retriever(
-            search_kwargs={
-                "k": 8
-            }
-        )
-        
-        # Expand user queries with substantive legal keywords to bypass index matches
-        expanded_query = user_input
-        if "328" in user_input:
-            expanded_query = f"Section 328 Causing hurt by means of poison drug stupefying unwholesome {user_input}"
-
-        docs = retriever.invoke(expanded_query)
-
-        print(f"Step 3 - Retrieved Docs: {len(docs)}")
-        print("\n--- RETRIEVED CHUNKS DEBUG ---")
-        for i, doc in enumerate(docs):
-            print(f"Chunk {i+1} Metadata: {doc.metadata}")
-            print(f"Chunk {i+1} Sample Text: {doc.page_content[:150]}...\n")
-
-        # Combine unique chunks while filtering out obvious Index/Arrangement of Sections lines
-        valid_contents = []
-        for doc in docs:
-            # Skip chunks that are clearly just table-of-content headers
-            if "ARRANGEMENT OF SECTIONS" in doc.page_content.upper() and len(doc.page_content) < 500:
-                continue
-            valid_contents.append(doc.page_content)
-
-        context_text = "\n\n".join(valid_contents)
-
-    # Stream response from model
-    stream = chain.stream({"context": context_text, "input": user_input})
-    for chunk in stream:
-        yield chunk.content
-
-    # Clean display for citations (without broken page numbers)
-    if docs:
-        page_numbers = set()
-        for doc in docs:
-            page = doc.metadata.get("page") or doc.metadata.get("page_number")
-            # Only include valid positive page numbers
-            if page is not None and isinstance(page, (int, float)) and page > 0:
-                page_numbers.add(str(int(page)))
-
-        if page_numbers:
-            pages_str = ", ".join(sorted(page_numbers, key=lambda x: int(x)))
-            ref_msg = f"\n\n---\n📌 **Reference Source:** IPC PDF Document (Page(s): {pages_str})"
-        else:
-            ref_msg = "\n\n---\n📌 **Reference Source:** IPC Document Context"
-
-        yield ref_msg
-
-
-# 6. Chat Input Loop
-if user_prompt := st.chat_input("Ask a question about the Indian Penal Code..."):
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
+if question := st.chat_input("Ask about an IPC section or offence, e.g. 'What is the punishment for stalking?'"):
+    st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
-        st.markdown(user_prompt)
+        st.markdown(question)
 
     with st.chat_message("assistant"):
-        response = st.write_stream(generate_response(user_prompt))
-
-    st.session_state.messages.append(
-        {"role": "assistant", "content": response}
-    )
+        if not answer_mode:
+            with st.spinner("Searching…"):
+                result = assistant.retriever.search(question)
+            text = "Retrieved sections: " + ", ".join(f"**{i}**" for i in result.section_ids) if result.sections \
+                else "No matching sections found."
+            st.markdown(text)
+            render_sections(result, set())
+        else:
+            try:
+                with st.spinner("Searching and drafting answer…"):
+                    res = assistant.ask(question)
+            except Exception as e:  # LLM down / no key: degrade to retrieval-only instead of a stack trace
+                if type(e).__name__ == "AuthenticationError":
+                    hint = "Anthropic rejected the API key - check ANTHROPIC_API_KEY in .env (console.anthropic.com)."
+                elif provider == "ollama":
+                    hint = f"Is Ollama running? `brew services start ollama` and `ollama pull {settings.ollama_model}`."
+                else:
+                    hint = f"{type(e).__name__}: {str(e)[:200]}"
+                st.error(f"LLM unavailable - showing retrieved sections only. {hint}")
+                result = assistant.retriever.search(question)
+                render_sections(result, set())
+                text = "(LLM unavailable)"
+            else:
+                text = res.answer
+                if res.citations:
+                    text += "\n\n**Sources:** " + "; ".join(f"Section {c.section_id} — “{c.quote}”" for c in res.citations)
+                elif not res.abstained:
+                    text += "\n\n⚠️ _No citation could be verified against the source text — treat with caution._"
+                st.markdown(text)
+                render_sections(res.retrieval, {c.section_id for c in res.citations})
+                timing = " · ".join(f"{k} {v / 1000:.1f}s" for k, v in res.timings_ms.items())
+                st.caption(timing + (f" · tokens {res.usage.input_tokens}/{res.usage.output_tokens}" if res.usage else ""))
+    st.session_state.messages.append({"role": "assistant", "content": text})
