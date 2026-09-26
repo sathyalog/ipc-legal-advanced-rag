@@ -18,7 +18,37 @@ The first version (LangChain + Pinecone, kept in [`legacy/`](legacy/)) answered 
 ## Results
 
 <!-- RESULTS:START -->
-_Run `python -m ipc_rag.eval.run retrieval` to regenerate — see [reports/](reports/)._
+**Section lookups: 1,698 / 1,698 correct at rank 1** (566 sections × 3 phrasings). This is enforced by `tests/eval/test_section_lookup.py`, which runs in about 20 s with no LLM.
+
+Deterministic retrieval benchmark (no LLM, generated from the Code itself). The *lookup* suite has 566 queries of the form "What does IPC section N say?". The *title* suite has 466 queries: the section heading with its number removed.
+
+| Configuration | Lookup hit@1 | Lookup hit@5 | Title hit@1 | Title hit@5 |
+|---|---|---|---|---|
+| **Legacy** (1000-char chunks, MiniLM, dense top-8) | 0.2% | 1.2% | 35.2% | 81.1% |
+| Dense only (bge-base, section-aware nodes) | 20.3% | 37.3% | 97.4% | 100% |
+| Sparse only (BM25) | 60.6% | 68.9% | 93.8% | 99.8% |
+| Hybrid (dense + BM25, RRF) | 41.5% | 73.3% | 97.6% | 100% |
+| **Full** (router + hybrid + rerank) | **100%** ¹ | **100%** ¹ | 100% ² | 100% ² |
+
+¹ All 1,698 lookup queries (3 phrasings per section). ² Random sample of 60 title queries; the full-size run is pending.
+
+What the table shows:
+- **No embedding model retrieves sections by number.** Dense search found only 20% of lookups, even on clean section-aware nodes. Numbers need an exact path, which is why the router exists.
+- **Chunking was the bigger problem for meaning-based queries.** Moving from 1000-char chunks to one node per section took title hit@1 from 35% to 97%.
+- The legacy ~81% hit@5 on titles matches the "right about 80% of the time" experience with the old app.
+
+RAGAS retrieval tier on the 40-question golden set (`IDBasedContextRecall`, no LLM):
+
+| Configuration | All | Lookup | Semantic | Lay-language | Multi-section |
+|---|---|---|---|---|---|
+| Dense | 0.765 | 0.833 | 1.00 | 0.375 | 0.75 |
+| Hybrid | 0.824 | 1.00 | 1.00 | 0.375 | 0.75 |
+| Hybrid + `bge-reranker-base` | 0.868 | 1.00 | 1.00 | 0.50 | 0.875 |
+| Hybrid + `ms-marco-MiniLM-L-6-v2` (default) | 0.868 | 1.00 | 1.00 | **0.56** | 0.75 |
+
+MiniLM was chosen over bge-reranker-base because it scored higher on lay-language questions at about 1/6 of the CPU latency (~1 s vs ~7 s per query). **Lay-language questions ("my neighbour attacked me with a knife") are the known weak spot.** The optional LLM query rewrite (`IPC_QUERY_REWRITE=true`) targets them; it is not measured yet.
+
+The LLM-judged RAGAS tier (faithfulness, answer relevancy, factual correctness, abstention) is built but has not run yet. Run `uv run ipc-eval ragas --configs full,full_rewrite` with an LLM configured.
 <!-- RESULTS:END -->
 
 ## Why the old version missed ~20%
@@ -33,6 +63,18 @@ _Run `python -m ipc_rag.eval.run retrieval` to regenerate — see [reports/](rep
 | Re-indexing duplicated vectors | Deterministic UUIDs + LlamaIndex `IngestionPipeline` docstore (upserts; a re-run writes 0 nodes) |
 | No reranking, no evaluation | Hybrid (bge dense + BM25 sparse, RRF) → cross-encoder rerank, and a two-tier eval harness |
 | Hardcoded query hack for section 328 | Removed; the router generalises to all 566 sections |
+
+## What runs where
+
+```
+Your question
+   ├─ 1. Router (regex)           "section 328" → fetch section 328 directly      ← local
+   ├─ 2. Hybrid search (Qdrant)   meaning (bge) + keywords (BM25), fused by RRF    ← local, .qdrant/ on disk
+   ├─ 3. Rerank (cross-encoder)   re-scores the top 20, keeps the best 5           ← local, CPU
+   └─ 4. LLM answer               structured answer + quotes, then verified        ← Claude API or Ollama
+```
+
+**Retrieval (steps 1–3) needs no API key and no internet.** The index and models live on your machine. The LLM is used only to write the answer from the retrieved sections, so it can't cite a section that retrieval didn't find. If the LLM is unavailable (no key, bad key, Ollama not running), the app still works and shows the retrieved sections with their full text. In the UI, "exact match" means the router found the section number. "search · -7.7" is the reranker's relevance score: higher is better, and negative values are normal.
 
 ## Architecture
 
@@ -95,14 +137,32 @@ uv run ipc-eval ragas --configs full,full_rewrite                          # tie
 uv run ipc-testset --size 60                                               # draft new golden questions
 ```
 
-An LLM is only needed for generated answers and the tier-2 metrics. Without one, the app still shows the retrieved sections.
+An LLM is only needed for generated answers and the tier-2 metrics. Without one, the app still shows the retrieved sections. Choose based on your machine:
+
+**Claude API (recommended; required on 8 GB machines).** Billed per token, about $0.01 per question with Sonnet 5. A Claude subscription does not include API credits.
 
 ```bash
-brew install ollama                     # free, local (default provider)
-brew services start ollama              # runs the Ollama server in the background (or `ollama serve` in its own terminal)
-ollama pull qwen2.5:7b-instruct         # ~4.7 GB, one-off
-# or Claude (billed per token):  cp .env.example .env  and set IPC_LLM_PROVIDER=anthropic, ANTHROPIC_API_KEY
+cp .env.example .env        # .env is git-ignored. Never put keys in .env.example (it is committed)
+# in .env:  IPC_LLM_PROVIDER=anthropic
+#           ANTHROPIC_API_KEY=sk-ant-...      (console.anthropic.com)
 ```
+
+**Ollama (free, local; needs 16 GB+ RAM for a 7B model).**
+
+```bash
+brew install ollama
+brew services start ollama              # or `ollama serve` in its own terminal
+ollama pull qwen2.5:7b-instruct         # ~4.7 GB; on 8 GB RAM use qwen2.5:3b-instruct and set IPC_OLLAMA_MODEL
+```
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Whole machine freezes after asking a question | A local 7B model plus the app plus a browser exceeds 8 GB RAM, so macOS swaps | Use the Claude API, or a 3B Ollama model. `brew services stop ollama` frees the RAM |
+| Terminal floods with `No module named 'torchvision'` | Streamlit's file watcher imports every lazy `transformers` submodule on each rerun | Already disabled in `.streamlit/config.toml` (`fileWatcherType = "none"`). Restart the app after code changes |
+| "Anthropic rejected the API key" | Key missing from `.env`, revoked, or from another workspace | Put a valid key in `.env` (not `.env.example`) |
+| "Storage folder … is already accessed by another instance" | Embedded Qdrant allows one process at a time | Stop the app before running evals, or set `IPC_QDRANT_URL` to a Qdrant server |
 
 Dependencies live in `pyproject.toml` and are locked in `uv.lock`. Add one with `uv add <pkg>`. `requirements.txt` is generated from the lock only for Hugging Face Spaces, which reads that file.
 
