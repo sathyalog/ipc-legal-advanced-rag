@@ -21,11 +21,25 @@ settings = get_settings()
 @st.cache_resource(show_spinner="Loading index and models…")
 def load_assistant():
     from ipc_rag.generation.answer import IPCAssistant
-    if not settings.sections_path.exists():
+    from ipc_rag.store import get_qdrant_client
+    # The Qdrant index is gitignored, so fresh deploys (Streamlit Cloud, Spaces) must build it on first start
+    if not settings.sections_path.exists() or not get_qdrant_client().collection_exists(settings.collection):
         from ipc_rag.ingest.__main__ import run as ingest
         if ingest() != 0:
             raise RuntimeError("Ingestion failed - see logs")
     return IPCAssistant(settings)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def llm_available() -> bool:
+    """Cheap check so deploys without an LLM default to sections-only mode instead of erroring."""
+    if settings.llm_provider == "anthropic":
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    import httpx
+    try:
+        return httpx.get(settings.ollama_base_url, timeout=1).status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 def render_sections(result, cited: set[str]) -> None:
@@ -46,8 +60,11 @@ with st.sidebar:
     provider = settings.llm_provider
     model = settings.anthropic_answer_model if provider == "anthropic" else settings.ollama_model
     st.markdown(f"**LLM:** `{provider}` · `{model}`")
-    answer_mode = st.toggle("Generate answer (uses LLM)", value=True,
+    has_llm = llm_available()
+    answer_mode = st.toggle("Generate answer (uses LLM)", value=has_llm,
                             help="Off = show retrieved sections only (no LLM needed)")
+    if not has_llm:
+        st.caption("No LLM reachable - showing retrieved sections only.")
     st.markdown(f"**Retrieval:** router + hybrid (bge + BM25) + rerank · top {settings.rerank_top_n}")
     if st.button("Clear chat"):
         st.session_state.messages = []
