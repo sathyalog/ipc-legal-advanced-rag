@@ -7,3 +7,5 @@ __pycache__/
 .cache/
 data/ingest_docstore.json
 repomix-output.xml
+docs/INTERVIEW_NOTES.md
+docs/INTERVIEW_NOTES_NOTION.md
