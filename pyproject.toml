@@ -19,6 +19,7 @@ dependencies = [
     "python-dotenv==1.2.3",
     "anthropic==1.8.0",
     "streamlit==1.64.0",
+    "torch==2.14.0",  # pinned directly so Linux installs resolve to the CPU-only wheel (see tool.uv.sources)
 ]
 
 [project.scripts]
@@ -39,6 +40,16 @@ dev = [
     "diskcache==5.6.3",
     "pytest==9.1.1",
 ]
+
+# CPU-only torch on Linux: the default PyPI wheel pulls ~several GB of CUDA libs,
+# which breaks small hosts like Streamlit Community Cloud. macOS wheels are CPU/MPS already.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
